@@ -1,0 +1,96 @@
+You are checking whether two descriptions of a Kubernetes NetworkPolicy
+request specify the EXACT SAME policy. You will be given:
+  A: the original request, in whatever words the user chose
+  B: a reconstructed sentence built from fields an extractor parsed out of A
+
+Wording, tone, sentence structure, and order do NOT matter — ignore them
+completely. Only compare the concrete, load-bearing details:
+  - direction: is this about egress (pods reaching OUT to a CIDR) or
+    ingress (things reaching IN to pods)?
+  - the CIDR value itself, compared character-for-character (100.0.32.0/24
+    is NOT the same as 100.0.16.0/24 — a single differing octet is a
+    DIFFERENT policy, even though the sentences otherwise look identical)
+  - allow vs deny / block direction — is the named CIDR the one being
+    PERMITTED or the one being BLOCKED? A sentence that swaps this word
+    describes the OPPOSITE policy even if every other word matches.
+  - port/protocol, if either sentence specifies one
+  - peer NAMESPACE identity (for rules about "namespace X" as a peer, not a
+    CIDR) — compared exactly like a CIDR would be; a different namespace
+    name is a different policy
+  - when MULTIPLE ports/protocols are listed, every one of them must match —
+    a missing or extra port/protocol in either sentence is a different policy
+  - when MULTIPLE labels are listed for selecting pods (target pods or peer
+    pods), every label (key AND value) must match — a subset, a superset, or
+    a different label set is a different policy
+  - a sentence describing BOTH an ingress rule AND an egress rule together
+    needs BOTH sides to match independently — if either side differs, they
+    are different policies even if the other side is identical
+
+IMPORTANT — "ipBlock cidr: 0.0.0.0/0 and except: [X]" phrasing: this is a
+common way to express "block X, allow everything else." Read it carefully:
+0.0.0.0/0 means ALL addresses; "except: [X]" REMOVES X from that allowed
+set. So the net effect is X is BLOCKED and everything else is ALLOWED —
+this is a BLOCK/DENY of X, not an allow of X. Do not be fooled by the word
+"allow" appearing next to "0.0.0.0/0" into thinking X itself is allowed.
+
+This is a rule for correctly READING B when B happens to use that phrasing
+— it is NOT a shortcut for skipping the comparison. Seeing the except-clause
+in B does not by itself make same_meaning true. You must still separately
+work out what A actually says (does A allow only X, or block X?) and check
+it matches what B means (block X, allow rest). If A says "only allow X,
+deny everything else" — that is the OPPOSITE of what the except-clause
+phrasing means, even though X appears in both sentences.
+
+Return ONLY a JSON object, no prose, no markdown fences:
+{"same_meaning": <bool>, "reason": "<one short sentence citing the specific
+detail that matched or differed>"}
+
+Examples:
+
+A: "Allow egress from all pods in vienna to 100.0.18.0/24 on port 80, deny everything else."
+B: "Allow egress from ALL pods in namespace 'vienna' to the external CIDR 100.0.18.0/24 on TCP port 80. Deny all other egress by default."
+{"same_meaning": true, "reason": "same CIDR 100.0.18.0/24, same allow direction, same port 80"}
+
+A: "Please block traffic from vienna out to 100.0.18.0/24, everything else is fine."
+B: "Allow egress from ALL pods in namespace 'vienna' to the external CIDR 100.0.18.0/24 on TCP port 80. Deny all other egress by default."
+{"same_meaning": false, "reason": "A blocks the CIDR, B allows it — opposite direction"}
+
+A: "Lock down vienna so nothing outbound reaches 100.0.18.0/24, allow everything else."
+B: "Allow egress from ALL pods in namespace 'vienna' to the external CIDR 100.0.64.0/24 on TCP port 80. Deny all other egress by default."
+{"same_meaning": false, "reason": "different CIDR: 100.0.18.0/24 vs 100.0.64.0/24"}
+
+A: "I need a policy that blocks outgoing traffic from all pods in 'lisbon' to 100.0.17.0/24, while allowing egress to anywhere else."
+B: "Block egress from ALL pods in namespace 'lisbon' to CIDR 100.0.17.0/24. Allow egress to all other destinations. Implement with ipBlock cidr: 0.0.0.0/0 and except: [100.0.17.0/24]."
+{"same_meaning": true, "reason": "both block 100.0.17.0/24 and allow everything else — the ipBlock/except clause in B is just the implementation of that same block, not an allow of the CIDR"}
+
+A: "Deny all ingress to pods in 'geneva' — fully isolate the namespace."
+B: "Allow ingress to ALL pods in namespace 'geneva' from CIDR 100.0.7.0/24 on TCP port 80."
+{"same_meaning": false, "reason": "A denies all ingress (isolation), B allows ingress from a specific CIDR — opposite"}
+
+A: "Only let pods in 'porto' reach 100.0.11.0/24, block egress to everywhere else."
+B: "Block egress from ALL pods in namespace 'porto' to CIDR 100.0.11.0/24. Allow egress to all other destinations. Implement with ipBlock cidr: 0.0.0.0/0 and except: [100.0.11.0/24]."
+{"same_meaning": false, "reason": "A allows ONLY 100.0.11.0/24 and blocks everything else; B blocks 100.0.11.0/24 and allows everything else — opposite, even though the same CIDR appears in both and B uses the except-clause phrasing"}
+
+A: "Block outgoing traffic from 'porto' pods to 100.0.11.0/24, allow egress everywhere else."
+B: "Block egress from ALL pods in namespace 'porto' to CIDR 100.0.11.0/24. Allow egress to all other destinations. Implement with ipBlock cidr: 0.0.0.0/0 and except: [100.0.11.0/24]."
+{"same_meaning": true, "reason": "both block 100.0.11.0/24 and allow everything else"}
+
+A: "Only pods in the 'payments' namespace should be able to reach 'checkout', block every other namespace."
+B: "Allow ingress to ALL pods in namespace 'checkout' only from pods in namespace 'billing' on TCP port 80. Deny all other ingress by default."
+{"same_meaning": false, "reason": "different peer namespace: payments vs billing"}
+
+A: "Analytics pods need egress to 10.0.0.0/8 on ports 80, 443 and 22, nothing else."
+B: "Allow egress from ALL pods in namespace 'analytics' to the external CIDR 10.0.0.0/8 on the following ports: TCP port 80, TCP port 443. All listed ports must be allowed and nothing else — no port outside this list."
+{"same_meaning": false, "reason": "A lists three ports (80, 443, 22), B only lists two (80, 443) — missing port 22"}
+
+A: "Let the payments-backend pods (app=payments, tier=backend) accept traffic only from the gateway-frontend pods (app=gateway, tier=frontend) on port 8080."
+B: "Allow ingress to pods in namespace 'payments' with ALL of these labels: app=payments, tier=backend, only from pods with ALL of these labels: app=gateway, tier=frontend, on TCP port 8080. Deny all other ingress."
+{"same_meaning": true, "reason": "both target labels (app=payments, tier=backend) and both peer labels (app=gateway, tier=frontend) match exactly, same port"}
+
+A: "Fully isolate 'billing' from all inbound traffic, and let it reach 172.16.0.0/16 on port 443, nothing else outbound."
+B: "Deny ALL ingress to pods in namespace 'billing'. Fully isolate from inbound traffic — no ingress rules at all. Allow egress from ALL pods in namespace 'billing' to CIDR 172.16.0.0/16 on TCP port 443. Deny all other egress by default."
+{"same_meaning": true, "reason": "ingress side matches (deny-all) and egress side matches (allow only 172.16.0.0/16 on port 443)"}
+
+A: "Fully isolate 'billing' from all inbound traffic, and let it reach 172.16.0.0/16 on port 443, nothing else outbound."
+B: "Deny ALL ingress to pods in namespace 'billing'. Fully isolate from inbound traffic — no ingress rules at all. Allow egress from ALL pods in namespace 'billing' to CIDR 172.16.5.0/16 on TCP port 443. Deny all other egress by default."
+{"same_meaning": false, "reason": "ingress side matches, but egress CIDR differs: 172.16.0.0/16 vs 172.16.5.0/16"}
